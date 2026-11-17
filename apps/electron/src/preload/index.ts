@@ -6,6 +6,8 @@
  */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import { BILLION_CONTEXT_IPC_CHANNELS } from '@proma/shared'
+import type { BillionContextSettings, BillionContextConnectionResult } from '@proma/shared'
 import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, SLACK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, VAULT_IPC_CHANNELS, AGENT_ISLAND_IPC_CHANNELS, TERMINAL_IPC_CHANNELS } from '@proma/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS } from '../types'
 import type {
@@ -549,6 +551,11 @@ export interface ElectronAPI {
 
   /** 检测系统代理 */
   detectSystemProxy: () => Promise<SystemProxyDetectResult>
+
+  /** billion-context 仅作用于 Agent 模型请求，不是全局网络代理 */
+  getBillionContextSettings: () => Promise<BillionContextSettings>
+  updateBillionContextSettings: (settings: BillionContextSettings) => Promise<void>
+  testBillionContextConnection: (proxyUrl: string) => Promise<BillionContextConnectionResult>
 
   // ===== 流式事件订阅（返回清理函数） =====
 
@@ -1840,6 +1847,14 @@ const electronAPI: ElectronAPI = {
   detectSystemProxy: () => {
     return ipcRenderer.invoke(PROXY_IPC_CHANNELS.DETECT_SYSTEM)
   },
+
+  getBillionContextSettings: () => ipcRenderer.invoke(BILLION_CONTEXT_IPC_CHANNELS.GET_SETTINGS),
+  updateBillionContextSettings: (settings: BillionContextSettings) => (
+    ipcRenderer.invoke(BILLION_CONTEXT_IPC_CHANNELS.UPDATE_SETTINGS, settings)
+  ),
+  testBillionContextConnection: (proxyUrl: string) => (
+    ipcRenderer.invoke(BILLION_CONTEXT_IPC_CHANNELS.TEST_CONNECTION, proxyUrl)
+  ),
 
   // 流式事件订阅
   onStreamChunk: (callback: (event: StreamChunkEvent) => void) => {

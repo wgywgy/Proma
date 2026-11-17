@@ -84,6 +84,8 @@ import { BROWSER_ENABLE_TOOL_NAME, createBrowserToolPolicy, isManagedBrowserTool
 import { createPiRetryTerminalGate, mapPiNativeRetryEvent } from './pi-retry-control'
 import { preparePiInterruptedContext } from './pi-interrupted-context'
 import { withDefaultShellTimeout } from './pi-shell-policy'
+import { getBillionContextSettings } from '../billion-context-settings-service'
+import { connectPiBillionContext, type BillionContextConnection } from './pi-billion-context'
 import {
   closePiRequestProxyDispatcher,
   createPiRequestProxyDispatcher,
@@ -199,6 +201,7 @@ interface ActivePiSession {
   resolveReady: (session: AgentSession) => void
   rejectReady: (error: unknown) => void
   abortRequested: boolean
+  contextConnectionAbort?: AbortController
   interrupting: boolean
   pendingInterruptPrompts: PendingInterruptPrompt[]
   interruptAbortPromise?: Promise<void>
@@ -1430,6 +1433,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     active.onSkillActivated = input.onSkillActivated
     let unsubscribe: (() => void) | undefined
     let requestProxyDispatcher: Dispatcher | undefined
+    let billionContextConnection: BillionContextConnection | undefined
 
     const cleanupActiveSession = (): void => {
       try {
@@ -1445,12 +1449,24 @@ export class PiAgentAdapter implements AgentProviderAdapter {
           this.activeSessions.delete(input.sessionId)
         }
       } finally {
+        active.contextConnectionAbort?.abort()
+        void billionContextConnection?.close().catch((error: unknown) => {
+          console.warn('[billion-context] 关闭会话连接失败:', error)
+        })
+        billionContextConnection = undefined
         void closePiRequestProxyDispatcher(requestProxyDispatcher)
         requestProxyDispatcher = undefined
       }
     }
 
     try {
+      const billionContextSettings = getBillionContextSettings()
+      if (billionContextSettings.enabled && ['openai-codex', 'xai', 'github-copilot'].includes(input.provider)) {
+        throw new Error('billion-context 首批暂不支持订阅 OAuth 渠道，请关闭该开关或选择 HTTP API Key 渠道')
+      }
+      if (billionContextSettings.enabled && input.compactRequest) {
+        throw new Error('billion-context 已接管上下文压缩；请使用代理的压缩工具，或先关闭接入再执行 Pi 手动压缩')
+      }
       installPiRequestProxyFetch()
       requestProxyDispatcher = createPiRequestProxyDispatcher({
         proxyUrl: resolvePiHttpProxy(input),
@@ -1503,11 +1519,11 @@ export class PiAgentAdapter implements AgentProviderAdapter {
           })]
         : []
       const customTools = [
-        buildCurrentSessionCompactionTool(
+        ...(!billionContextSettings.enabled ? [buildCurrentSessionCompactionTool(
           sdk,
           () => { compactContextRequested = true },
           input.canUseTool,
-        ),
+        )] : []),
         ...buildBuiltinToolDefinitions(
           sdk,
           cwd,
@@ -1522,7 +1538,8 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         // 使用 Pi SDK 原生压缩策略：
         // - 手动压缩由 session.compact() 触发；
         // - 自动压缩在上下文达到模型窗口的约 80% 时触发；Pi 以 reserveTokens 表示预留空间。
-        compaction: { enabled: true, reserveTokens: autoCompactionReserveTokens },
+        // 外部代理接管时关闭本地自动压缩，避免两个压缩器改写同一段历史。
+        compaction: { enabled: !billionContextSettings.enabled, reserveTokens: autoCompactionReserveTokens },
         // Pi 原生 retry 通过 agent.continue() 在同一 transcript 中恢复，能保留已完成的
         // tool_result；不能用外层重投原始 prompt 替代，否则会重复执行副作用工具。
         retry: {
@@ -1607,6 +1624,16 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         noTools: 'builtin',
         customTools,
       })
+      active.session = session
+      active.contextConnectionAbort = new AbortController()
+      if (active.abortRequested) active.contextConnectionAbort.abort()
+      const contextConnection = await connectPiBillionContext(
+        billionContextSettings,
+        model,
+        session.sessionId,
+        { httpIdleTimeoutMs: input.httpIdleTimeoutMs, signal: active.contextConnectionAbort.signal },
+      )
+      billionContextConnection = contextConnection
       session.agent.toolExecution = 'sequential'
       // 隐藏的浏览器工具不会发送给模型；加载入口与后续工具仍经过相同权限包装。
       session.setActiveToolsByName(browserPolicy.initialActiveToolNames(session.getActiveToolNames()))
@@ -1648,14 +1675,16 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       const providerStreamFn = session.agent.streamFunction
       session.agent.streamFunction = (requestModel, context, options) => runWithPiRequestProxy(
         requestProxyDispatcher,
-        () => providerStreamFn(requestModel, context, options),
+        () => providerStreamFn(requestModel, context, contextConnection
+          ? { ...options, fetch: contextConnection.fetch, transport: 'sse' }
+          : options),
       )
       installRuntimeGuardHooks(session, runtimeGuard)
       installToolOutputBudgetHooks(
         session.agent,
         getToolOutputDirectory(input.piSessionDir, input.sessionId),
       )
-      installCurrentSessionCompactionHooks(session)
+      if (!billionContextSettings.enabled) installCurrentSessionCompactionHooks(session)
       active.session = session
       resolveActiveReady(active, session)
 
@@ -2074,6 +2103,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     const active = this.activeSessions.get(sessionId)
     if (!active) return
     active.abortRequested = true
+    active.contextConnectionAbort?.abort()
     rejectPendingInterruptPrompts(active, createAbortError())
     if (!active.session) rejectActiveReady(active, createAbortError())
     active.session?.abortCompaction()

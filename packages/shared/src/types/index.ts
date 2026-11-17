@@ -17,6 +17,7 @@ export * from './channel'
 
 // 代理配置相关类型
 export * from './proxy'
+export * from './billion-context'
 
 // Chat 相关类型
 export * from './chat'

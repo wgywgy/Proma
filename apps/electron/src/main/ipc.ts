@@ -11,6 +11,8 @@ import { realpath, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, AGENT_ISLAND_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, SLACK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, VAULT_IPC_CHANNELS, PLANNING_CONFLICT_ERROR, MAX_ATTACHMENT_SIZE, isPromaPermissionMode, normalizePathForCompare, removeMcpServerFromConfig, TERMINAL_IPC_CHANNELS } from '@proma/shared'
+import { BILLION_CONTEXT_IPC_CHANNELS } from '@proma/shared'
+import type { BillionContextSettings } from '@proma/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, QUICK_TASK_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS, WINDOWS_AGENT_ISLAND_IPC_CHANNELS, TRAY_IPC_CHANNELS } from '../types'
 import type {
   QuickTaskSubmitInput,
@@ -234,6 +236,8 @@ import {
   launchInstaller,
 } from './lib/installer-downloader'
 import { getEffectiveProxyUrl, getProxySettings, saveProxySettings } from './lib/proxy-settings-service'
+import { getBillionContextSettings, saveBillionContextSettings } from './lib/billion-context-settings-service'
+import { testBillionContextConnection } from './lib/adapters/pi-billion-context'
 import { getFetchFn } from './lib/proxy-fetch'
 import { detectSystemProxy } from './lib/system-proxy-detector'
 import {
@@ -2499,6 +2503,16 @@ export function registerIpcHandlers(): void {
       return detectSystemProxy()
     }
   )
+
+  // ===== billion-context 模型上下文代理 =====
+  ipcMain.handle(BILLION_CONTEXT_IPC_CHANNELS.GET_SETTINGS, () => getBillionContextSettings())
+  ipcMain.handle(BILLION_CONTEXT_IPC_CHANNELS.UPDATE_SETTINGS, (_, settings: BillionContextSettings) => {
+    saveBillionContextSettings(settings)
+  })
+  ipcMain.handle(BILLION_CONTEXT_IPC_CHANNELS.TEST_CONNECTION, (_, proxyUrl: string) => {
+    if (typeof proxyUrl !== 'string') throw new Error('billion-context 地址必须是字符串')
+    return testBillionContextConnection(proxyUrl)
+  })
 
   // ===== Agent 会话管理相关 =====
 

@@ -17,6 +17,7 @@ import {
 import { proxyConfigAtom, loadProxyConfigAtom, updateProxyConfigAtom } from '@/atoms/proxy-atoms'
 import { cn } from '@/lib/utils'
 import type { ProxyMode } from '@proma/shared'
+import { BillionContextSettings } from './BillionContextSettings'
 
 export function ProxySettings(): React.ReactElement {
   const [config, setConfig] = useAtom(proxyConfigAtom)
@@ -194,6 +195,7 @@ export function ProxySettings(): React.ReactElement {
           </SettingsCard>
         </SettingsSection>
       )}
+      <BillionContextSettings />
     </div>
   )
 }
