@@ -114,6 +114,8 @@ export interface PiBuiltinToolsContext {
   lastWindowsTerminalProfile?: TerminalProfile
   /** 用户关闭的生产力能力不能注入给 Agent。 */
   productivityTools?: ProductivityToolsSettings
+  /** 自动化工具默认不注入；只有显式启用该能力的调用方才注册。 */
+  automationEnabled?: boolean
 }
 
 function jsonToolResult(payload: unknown): AgentToolResult<unknown> {
@@ -1575,10 +1577,12 @@ export async function buildPiBuiltinTools(
   }
 
   // 自动化是 Proma 基础运行时能力，不作为可配置 MCP 展示或开关。
-  try {
-    tools.push(...buildAutomationTools(sdk, ctx))
-  } catch (error) {
-    console.error('[Pi 桥接] 注入 automation 工具失败:', error)
+  if (ctx.automationEnabled === true) {
+    try {
+      tools.push(...buildAutomationTools(sdk, ctx))
+    } catch (error) {
+      console.error('[Pi 桥接] 注入 automation 工具失败:', error)
+    }
   }
 
   // 任务/日程是 Pi native customTools；关闭的能力不会出现在本轮 Agent 工具集中。
@@ -1638,6 +1642,7 @@ export async function buildPiBuiltinTools(
 
   // Pi-native 受管浏览器不经过 MCP：网页 WebContents 和 CDP 永远停留在主进程。
   // 用户会话、自动任务与协作子会话共用同一套受管浏览器能力，仍受 URL、下载和权限策略约束。
+  // 定义留在本地注册表；适配器只在用户打开面板或调用 BrowserEnable 后将它们设为活跃工具。
   try {
     tools.push(...buildBrowserTools(sdk, ctx))
   } catch (error) {

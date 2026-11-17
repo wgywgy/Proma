@@ -1040,6 +1040,7 @@ export class AgentOrchestrator {
       // 必须与 runtime 接收的附加目录保持一致；视觉助手据此限制允许外发的图片路径。
       const productivityTools = appSettings.productivityTools
       const vaultUserContext = productivityTools.obsidianEnabled ? getVaultUserContext(sessionId) : null
+      const userBrowserContext = browserController.getUserContext(sessionId)
       const attachedDirectories = collectAttachedDirectories({
         extraDirs: additionalDirectories,
         sessionMeta,
@@ -1100,7 +1101,7 @@ export class AgentOrchestrator {
         workspaceName: workspace?.name,
         workspaceSlug,
         agentCwd,
-        userBrowserContext: browserController.getUserContext(sessionId),
+        userBrowserContext,
         userVaultContext: vaultUserContext,
       })
       // 11.5 注入 mention 引用指令（Skill/MCP/会话）— 仅影响 prompt，不影响持久化
@@ -1625,6 +1626,7 @@ export class AgentOrchestrator {
         permissionMode: initialPermissionMode,
         canUseTool,
         systemPrompt: systemPromptAppend + buildPiAdditionalDirectoriesPrompt(allAdditionalDirectories),
+        browserInitiallyEnabled: userBrowserContext != null,
         ...(instructionFiles.length > 0 && { projectInstructionFiles: instructionFiles }),
         ...(projectInstructions && {
           projectInstructionScope: {

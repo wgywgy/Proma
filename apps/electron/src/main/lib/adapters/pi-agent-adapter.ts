@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import type { Dispatcher } from 'undici'
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -70,7 +70,6 @@ import {
   convertPiMessage,
   convertResultMessage,
   displayToolName,
-  dropTrailingAbortedAssistant,
   hasToolResult,
   isAbortedAssistantMessage,
   isAssistantPiMessage,
@@ -80,7 +79,11 @@ import {
 import { DEFAULT_CONTEXT_WINDOW, buildModel } from './pi-model-registry'
 import { PendingPromptSkillActivationTracker } from './pi-skill-activation-tracker'
 import { normalizePiToolResultDetails, serializePiToolResultPayload } from './pi-tool-result-json'
+import { getToolOutputDirectory, installToolOutputBudgetHooks } from './pi-tool-output-budget'
+import { BROWSER_ENABLE_TOOL_NAME, createBrowserToolPolicy, isManagedBrowserTool } from './pi-browser-tool-policy'
 import { createPiRetryTerminalGate, mapPiNativeRetryEvent } from './pi-retry-control'
+import { preparePiInterruptedContext } from './pi-interrupted-context'
+import { withDefaultShellTimeout } from './pi-shell-policy'
 import {
   closePiRequestProxyDispatcher,
   createPiRequestProxyDispatcher,
@@ -126,6 +129,8 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
     options: CanUseToolOptions,
   ) => Promise<PermissionResult>
   systemPrompt: string
+  /** 仅用户主动打开的浏览器面板使工具默认活跃；其余会话经 BrowserEnable 按需加载。 */
+  browserInitiallyEnabled?: boolean
   /** Proma 已验证的项目根 instruction files；不触发 Pi 的磁盘自动发现。 */
   projectInstructionFiles?: PromaProjectInstructionFile[]
   /** 用于 typed 文件工具的会话级子目录指令激活；不会解析 Bash。 */
@@ -1153,13 +1158,20 @@ export function buildWslBashArgs(
   ]
 }
 
-function createWslBashOperations(runtimeEnv: AgentRuntimeEnv): BashOperations {
+export function createWslBashOperations(
+  runtimeEnv: AgentRuntimeEnv,
+  spawnProcess: (command: string, args: string[], options: SpawnOptions) => ChildProcess = spawn,
+): BashOperations {
   return {
     exec(command, cwd, options) {
       return new Promise((resolve, reject) => {
+        if (options.signal?.aborted) {
+          reject(new Error('aborted'))
+          return
+        }
         const mergedEnv = mergeRuntimeEnv(process.env, options.env)
         const args = buildWslBashArgs(runtimeEnv, cwd, command, mergedEnv)
-        const child = spawn(runtimeEnv.wslCommand ?? 'wsl.exe', args, {
+        const child = spawnProcess(runtimeEnv.wslCommand ?? 'wsl.exe', args, {
           env: mergedEnv,
           stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true,
@@ -1167,10 +1179,18 @@ function createWslBashOperations(runtimeEnv: AgentRuntimeEnv): BashOperations {
         let settled = false
         let timedOut = false
         let timeoutHandle: NodeJS.Timeout | undefined
+        let exitIdleHandle: NodeJS.Timeout | undefined
+        let exited = false
+        let exitCode: number | null = null
 
         const cleanup = (): void => {
           if (timeoutHandle) clearTimeout(timeoutHandle)
+          if (exitIdleHandle) clearTimeout(exitIdleHandle)
           options.signal?.removeEventListener('abort', onAbort)
+          child.stdout?.removeListener('data', onData)
+          child.stderr?.removeListener('data', onData)
+          child.stdout?.destroy()
+          child.stderr?.destroy()
         }
         const settle = (fn: () => void): void => {
           if (settled) return
@@ -1179,47 +1199,67 @@ function createWslBashOperations(runtimeEnv: AgentRuntimeEnv): BashOperations {
           fn()
         }
         const killChild = (): void => {
-          if (!child.killed) child.kill('SIGTERM')
+          if (child.exitCode !== null || child.signalCode !== null) return
+          child.kill('SIGTERM')
+          // killed 仅表示已发送信号，不能证明进程已退出。
+          const forceKillHandle = setTimeout(() => {
+            if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+          }, 500)
+          forceKillHandle.unref()
+          child.once('exit', () => clearTimeout(forceKillHandle))
         }
         const onAbort = (): void => {
           killChild()
-        }
-
-        if (options.signal?.aborted) {
-          killChild()
           settle(() => reject(new Error('aborted')))
-          return
         }
-
-        child.stdout?.on('data', options.onData)
-        child.stderr?.on('data', options.onData)
-        child.on('error', (error) => {
-          settle(() => reject(error))
-        })
-        child.on('close', (code) => {
+        const finish = (code: number | null): void => {
           if (options.signal?.aborted) {
             settle(() => reject(new Error('aborted')))
           } else if (timedOut) {
             settle(() => reject(new Error(`timeout:${options.timeout}`)))
           } else {
-            settle(() => resolve({ exitCode: code }))
+            // 信号退出不能以 null 被误判成成功。
+            settle(() => resolve({ exitCode: code ?? 1 }))
           }
+        }
+        const armExitIdleTimer = (): void => {
+          if (exitIdleHandle) clearTimeout(exitIdleHandle)
+          exitIdleHandle = setTimeout(() => finish(exitCode), 100)
+        }
+        const onData = (data: Buffer): void => {
+          options.onData(data)
+          if (exited && !settled) armExitIdleTimer()
+        }
+
+        child.stdout?.on('data', onData)
+        child.stderr?.on('data', onData)
+        child.on('error', (error) => {
+          settle(() => reject(error))
         })
+        // 后代可能持有 stdout/stderr，不能只依赖 close；等待输出空闲而非截断活动输出。
+        child.on('exit', (code) => {
+          exited = true
+          exitCode = code
+          if (!settled) armExitIdleTimer()
+        })
+        child.on('close', finish)
 
         if (options.timeout !== undefined && options.timeout > 0) {
           timeoutHandle = setTimeout(() => {
             timedOut = true
             killChild()
+            settle(() => reject(new Error(`timeout:${options.timeout}`)))
           }, options.timeout * 1000)
         }
         options.signal?.addEventListener('abort', onAbort, { once: true })
+        if (options.signal?.aborted) onAbort()
       })
     },
   }
 }
 
-function createPromaBashToolOptions(runtimeEnv: AgentRuntimeEnv | undefined): BashToolOptions | undefined {
-  if (!runtimeEnv) return undefined
+function createPromaBashToolOptions(sdk: PiSdk, runtimeEnv: AgentRuntimeEnv | undefined): BashToolOptions {
+  if (!runtimeEnv) return { operations: withDefaultShellTimeout(sdk.createLocalBashOperations()) }
 
   const spawnHook: NonNullable<BashToolOptions['spawnHook']> = ({ command, cwd, env }) => ({
     command,
@@ -1229,13 +1269,14 @@ function createPromaBashToolOptions(runtimeEnv: AgentRuntimeEnv | undefined): Ba
 
   if (runtimeEnv.shellKind === 'wsl') {
     return {
-      operations: createWslBashOperations(runtimeEnv),
+      operations: withDefaultShellTimeout(createWslBashOperations(runtimeEnv)),
       spawnHook,
     }
   }
 
   return {
     ...(runtimeEnv.shellPath && { shellPath: runtimeEnv.shellPath }),
+    operations: withDefaultShellTimeout(sdk.createLocalBashOperations({ shellPath: runtimeEnv.shellPath })),
     spawnHook,
   }
 }
@@ -1286,7 +1327,7 @@ function buildBuiltinToolDefinitions(
   const definitions = [
     sdk.createReadToolDefinition(cwd),
     ...(shellTool === 'bash'
-      ? [sdk.createBashToolDefinition(cwd, createPromaBashToolOptions(runtimeEnv))]
+      ? [sdk.createBashToolDefinition(cwd, createPromaBashToolOptions(sdk, runtimeEnv))]
       : []),
     ...(shellTool === 'powershell'
       ? [sdk.createPowerShellToolDefinition(cwd, createPromaPowerShellToolOptions(runtimeEnv))]
@@ -1441,6 +1482,26 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       let pendingTerminalResult: SDKMessage | undefined
       /** 当前压缩是否紧随一个成功完成的主 Agent turn。 */
       let completedAgentTurnPendingCompaction = false
+      const browserToolNames = (input.customTools ?? [])
+        .filter((tool) => isManagedBrowserTool(tool.name))
+        .map((tool) => tool.name)
+      const browserPolicy = createBrowserToolPolicy(browserToolNames, input.browserInitiallyEnabled)
+      const browserLoaderTools = browserToolNames.length > 0
+        ? [sdk.defineTool({
+            name: BROWSER_ENABLE_TOOL_NAME,
+            label: '加载受管浏览器工具',
+            description: '仅当用户要求浏览器交互或当前任务确实需要动态网页操作、本地网页预览时调用，加载导航、快照、点击和截图工具。普通代码、Git、文件处理任务不要调用；公开资料优先使用已启用的搜索或网页提取工具。此调用只加载能力，不导航页面，也不扩大既有权限。',
+            parameters: Type.Object({}),
+            async execute() {
+              if (!active.session) throw new Error('当前 Agent 会话尚未就绪')
+              const message = browserPolicy.enable(active.session)
+              return {
+                content: [{ type: 'text' as const, text: message }],
+                details: { enabled: true },
+              }
+            },
+          })]
+        : []
       const customTools = [
         buildCurrentSessionCompactionTool(
           sdk,
@@ -1454,7 +1515,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
           input.runtimeEnv,
         ),
         ...buildPromaProductToolDefinitions(sdk, input.canUseTool),
-        ...wrapCustomToolDefinitions(input.customTools, input.canUseTool),
+        ...wrapCustomToolDefinitions([...(input.customTools ?? []), ...browserLoaderTools], input.canUseTool),
       ]
 
       const settingsManager = sdk.SettingsManager.inMemory({
@@ -1520,7 +1581,10 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         additionalSkillPaths: input.additionalSkillPaths ?? [],
         skillsOverride: createPromaSkillsOverride(input.additionalSkillPaths),
         ...(extensionFactories.length > 0 && { extensionFactories }),
-        systemPromptOverride: () => appendWindowsBaseModeInstruction(input.systemPrompt, input.runtimeEnv),
+        systemPromptOverride: () => appendWindowsBaseModeInstruction(
+          browserPolicy.appendSystemPrompt(input.systemPrompt),
+          input.runtimeEnv,
+        ),
       })
       await resourceLoader.reload()
       active.resourceLoader = resourceLoader
@@ -1544,11 +1608,13 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         customTools,
       })
       session.agent.toolExecution = 'sequential'
+      // 隐藏的浏览器工具不会发送给模型；加载入口与后续工具仍经过相同权限包装。
+      session.setActiveToolsByName(browserPolicy.initialActiveToolNames(session.getActiveToolNames()))
       // Pi session artifact 可以来自旧版本，不能假设其历史 tool_result 已通过当前校验。
       // transformContext 在每个 provider 请求前执行，能隔离 resume 的坏图片而不篡改原 artifact。
       const previousTransformContext = session.agent.transformContext
-      session.agent.transformContext = async (messages, signal) => sanitizePiMessageImageContent(
-        await previousTransformContext?.(messages, signal) ?? messages,
+      session.agent.transformContext = async (messages, signal) => preparePiInterruptedContext(
+        sanitizePiMessageImageContent(await previousTransformContext?.(messages, signal) ?? messages),
       )
       // Pi 0.86 的 transcript-aware before_agent_start extension 会在下一轮注入动态项目指令。
       if (piAi && input.codexFastMode && input.provider === 'openai-codex' && isCodexFastModeSupportedModel(input.model)) {
@@ -1585,6 +1651,10 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         () => providerStreamFn(requestModel, context, options),
       )
       installRuntimeGuardHooks(session, runtimeGuard)
+      installToolOutputBudgetHooks(
+        session.agent,
+        getToolOutputDirectory(input.piSessionDir, input.sessionId),
+      )
       installCurrentSessionCompactionHooks(session)
       active.session = session
       resolveActiveReady(active, session)
@@ -1957,9 +2027,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
                 pendingTerminalResult = undefined
               }
             } finally {
-              if (active.interrupting) {
-                session.agent.state.messages = dropTrailingAbortedAssistant(session.agent.state.messages)
-              }
+              // 保留中断原文，后续请求由 transformContext 隔离不完整的协议块。
               active.interrupting = false
             }
             if (active.abortRequested) {
