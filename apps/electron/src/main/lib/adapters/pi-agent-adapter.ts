@@ -64,6 +64,7 @@ import type { ProjectInstructionSource } from '../project-instruction-resolver'
 import { createCodexFastModeExtension, withCodexFastModeServiceTier } from './pi-codex-request-settings'
 import { createDeepSeekReasoningRequestExtension } from './pi-deepseek-reasoning-request-settings'
 import { createOpenAIReasoningRequestExtension } from './pi-openai-reasoning-request-settings'
+import { createOpenAIChatToolCompatibilityExtension } from './pi-openai-chat-tool-compat'
 import { mergeRuntimeEnv, type AgentRuntimeEnv } from '../agent-runtime-env'
 import { sanitizePiMessageImageContent, sanitizeToolResultImageContent } from '../image-content-validation'
 import {
@@ -1578,6 +1579,9 @@ export class PiAgentAdapter implements AgentProviderAdapter {
               profile: openAIReasoningProfile,
               thinkingLevel: input.openAIThinkingLevel,
             })]
+          : []),
+        ...(model.api === 'openai-completions'
+          ? [createOpenAIChatToolCompatibilityExtension(input.baseUrl)]
           : []),
         ...(deepSeekReasoningProfile?.encodings['anthropic-messages']?.kind === 'deepseek-output-effort'
           ? [createDeepSeekReasoningRequestExtension({

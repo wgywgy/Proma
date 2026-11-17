@@ -365,6 +365,10 @@ export function resolveReasoningProfile(input: ResolveReasoningProfileInput): Re
   if (isGpt6SolFamily(modelId) || isGpt6LunaFamily(modelId)) {
     return OPENAI_SOL_LUNA_PROFILE.encodings[input.transport] ? OPENAI_SOL_LUNA_PROFILE : undefined
   }
+  // 仅复用已验证的推理档位，不把供应商模型 ID 当成官方家族继承窗口或 Fast Mode。
+  if (modelId === 'gpt-6.1-sol') {
+    return OPENAI_SOL_LUNA_PROFILE.encodings[input.transport] ? OPENAI_SOL_LUNA_PROFILE : undefined
+  }
   const profile = /^deepseek-flash(?:-|$)/.test(modelId)
     ? DEEPSEEK_FLASH_PROFILE
     : /^deepseek-v4-flash(?:-|$)/.test(modelId)
