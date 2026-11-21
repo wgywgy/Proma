@@ -13,10 +13,12 @@ import { writeExistingSkillFile } from './skill-file-write'
 import { rmSyncWithRetry, renameIfDestinationAbsentWithRetry, renameWithRetry } from './fs-retry'
 import { getLocalProjectRootStatus } from './project-root-health'
 import { writeJsonFileAtomic, readJsonFileSafe, writeTextFileAtomic } from './safe-file'
+import { readPreviousMemory, savePreviousMemory } from './workspace-memory-previous'
 import { randomUUID } from 'node:crypto'
 import { join, resolve, relative, isAbsolute, dirname, basename } from 'node:path'
 import {
   getAgentWorkspacesIndexPath,
+  getConfigDir,
   getAgentWorkspacesDir,
   getAgentWorkspacePath,
   getWorkspaceMcpPath,
@@ -33,6 +35,7 @@ import { listBuiltinMcpServers } from './builtin-mcp/catalog'
 import { RESERVED_BUILTIN_KEYS } from './builtin-mcp/baseline'
 import { inferMcpTransportType, normalizeMcpTransportType } from '@proma/shared'
 import type { AgentWorkspace, CreateAgentWorkspaceInput, WorkspaceMcpConfig, SkillMeta, SkillImportSource, OtherWorkspaceSkillsGroup, WorkspaceCapabilities, SkillFileNode, SkillFileContent, WorkspaceMemorySummary, BulkImportSkillItemResult, BulkImportSkillsResult, BulkImportWorkspaceSelection } from '@proma/shared'
+import type { WorkspaceMemoryFileContent } from '@proma/shared'
 
 interface AgentWorkspacesIndex {
   version: number
@@ -1615,7 +1618,7 @@ export function listWorkspaceAutoMemoryFiles(workspaceSlug: string): SkillFileNo
   return buildMemoryFileTree(dir, dir, 0)
 }
 
-export function readWorkspaceAutoMemoryFile(workspaceSlug: string, relativePath: string): SkillFileContent {
+export function readWorkspaceAutoMemoryFile(workspaceSlug: string, relativePath: string, includePrevious = false): WorkspaceMemoryFileContent {
   const dir = getWorkspaceAutoMemoryDir(workspaceSlug)
   const abs = resolveAutoMemoryFilePath(dir, relativePath)
   if (!existsSync(abs) && relativePath === AUTO_MEMORY_INDEX) {
@@ -1630,18 +1633,26 @@ export function readWorkspaceAutoMemoryFile(workspaceSlug: string, relativePath:
   }
 
   const binary = isLikelyBinaryFile(abs, st.size)
+  const canonicalPath = relative(dir, abs).split(/[\\/]/).join('/')
   return {
-    relativePath: relative(dir, abs).split(/[\\/]/).join('/'),
+    relativePath: canonicalPath,
     isText: !binary,
     size: st.size,
     content: binary ? undefined : readFileSync(abs, 'utf-8'),
+    previousContent: includePrevious === true && !binary
+      ? readPreviousMemory(join(getConfigDir(), 'workspace-memory-previous'), workspaceSlug, canonicalPath, SKILL_FILE_SIZE_LIMIT)
+      : undefined,
   }
 }
 
 export function writeWorkspaceAutoMemoryFile(workspaceSlug: string, relativePath: string, content: string, expectedContent?: string): void {
   const dir = getWorkspaceAutoMemoryDir(workspaceSlug)
   const abs = resolveAutoMemoryFilePath(dir, relativePath)
-  const currentContent = existsSync(abs) ? readFileSync(abs, 'utf-8') : ''
+  const existing = lstatSync(abs, { throwIfNoEntry: false })
+  if (existing && (!existing.isFile() || existing.size > SKILL_FILE_SIZE_LIMIT || isLikelyBinaryFile(abs, existing.size))) {
+    throw new Error('只能保存未超过 10 MB 的普通文本文件')
+  }
+  const currentContent = existing ? readFileSync(abs, 'utf-8') : ''
   if (expectedContent !== undefined && currentContent !== expectedContent) {
     throw new Error('文件已被外部更新。请刷新后再处理你的修改。')
   }
@@ -1649,9 +1660,14 @@ export function writeWorkspaceAutoMemoryFile(workspaceSlug: string, relativePath
   if (byteLen > SKILL_FILE_SIZE_LIMIT) {
     throw new Error(`内容过大（${(byteLen / 1024 / 1024).toFixed(2)} MB），超过 10 MB 限制`)
   }
+  if (existing && currentContent === content) return
   const parent = dirname(abs)
   if (!existsSync(parent)) {
     mkdirSync(parent, { recursive: true })
+  }
+  if (existing) {
+    const canonicalPath = relative(dir, abs).split(/[\\/]/).join('/')
+    savePreviousMemory(join(getConfigDir(), 'workspace-memory-previous'), workspaceSlug, canonicalPath, currentContent)
   }
   writeTextFileAtomic(abs, content)
   console.log(`[Agent 工作区] 已更新长期记忆文件: ${workspaceSlug}/${relativePath}`)

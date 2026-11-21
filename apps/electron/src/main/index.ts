@@ -121,8 +121,8 @@ import { getWeChatConfig } from './lib/wechat-config'
 import { createQuickTaskWindow, toggleQuickTaskWindow, destroyQuickTaskWindow } from './lib/quick-task-window'
 import { getAgentStatusHoverWindow, destroyAgentStatusHoverWindow } from './agent-status-hover-window'
 import { handleNativeAgentIslandEvent, initAgentIslandService, disposeAgentIslandService, publishAgentIslandNow } from './lib/agent-island-service'
-import { disposeMacAgentIslandNativeHost, startMacAgentIslandNativeHost, isMacAgentIslandNativeHostReady } from './lib/mac-agent-island-native-host'
-import { isAgentIslandServiceSupported, isMacAgentIslandSurfaceSupported } from './lib/macos-version'
+import { disposeMacAgentIslandNativeHost, startMacAgentIslandNativeHost } from './lib/mac-agent-island-native-host'
+import { isMacAgentIslandSurfaceSupported } from './lib/macos-version'
 import { getWindowsAgentIslandSurface, processNotification, type SurfaceDeps } from './lib/windows-agent-island-surface'
 import {
   createVoiceDictationWindow,
@@ -824,7 +824,7 @@ async function bootstrap(): Promise<void> {
   }
 
   // Agent Island 状态机在 macOS 和 Windows 都初始化；Swift surface 仅 macOS 26+。
-  if (isAgentIslandServiceSupported()) {
+  if (isMacAgentIslandSurfaceSupported() || process.platform === 'win32') {
     safeRun('initAgentIslandService', () => {
       initAgentIslandService({
         showAndFocusMainWindow,
@@ -832,12 +832,11 @@ async function bootstrap(): Promise<void> {
           sendToMainWindow(TRAY_IPC_CHANNELS.OPEN_AGENT_SESSION, { sessionId, title })
         },
         enabled: () => getSettings().agentIsland?.enabled !== false,
+        syncNativeSurface: process.platform === 'darwin'
+          ? (enabled) => { if (enabled) startAgentIslandSurface(); else disposeMacAgentIslandNativeHost() }
+          : undefined,
       })
     })
-  }
-
-  if (isMacAgentIslandSurfaceSupported()) {
-    safeRun('startAgentIslandSurface', startAgentIslandSurface)
   }
 
   // 飞书实时同步开启时，默认阻止系统自动休眠，保证远程群内继续可用。

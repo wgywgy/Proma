@@ -45,6 +45,7 @@ import { AgentBrowserLinkProvider } from '@/components/browser/AgentBrowserLinkP
 import { AgentHistorySelectionLayer } from './AgentHistorySelectionLayer'
 import { TaskProgressOverlay, type ContextCompactionProgress } from './TaskProgressOverlay'
 import { createMessageGroupRenderCache, groupMessagesForRendering } from './message-group-rendering'
+import { createToolMessageProjection, mergeTranscriptMessages, prepareTranscriptHistory } from './transcript-cache'
 import type { AgentEventUsage, RetryAttempt, SDKAssistantMessage, SDKMessage, SDKSystemMessage, SDKTextBlock, SDKThinkingBlock } from '@proma/shared'
 import { getSDKCompactStatus } from '@proma/shared'
 import { agentLiveMessagesAtomFamily, agentSessionStreamingStateAtomFamily, type AgentStreamState } from '@/atoms/agent-atoms'
@@ -989,54 +990,28 @@ export const AgentMessages = React.memo(function AgentMessages({
   // 历史消息加载都必须立即定位，避免 ResizeObserver 触发滚动 spring 动画。
   // 合并持久化 + 实时 SDKMessage：同一 UUID 的 live 消息替换历史快照，避免
   // 历史会话快速续跑时 live atom 尚未清空而把同一 assistant 渲染两次。
-  const allSDKMessages = React.useMemo(() => {
-    const persisted = persistedSDKMessages ?? []
-    const live = liveMessages ?? []
-    const stampStableKey = (message: SDKMessage): SDKMessage => {
-      const key = getSDKMessageStableKey(message)
-      const record = message as Record<string, unknown>
-      // 已标记且未变化时不重写：对老世代消息对象的属性写入会触发 GC 写屏障，
-      // 在数百条历史 × 高频 partial 下形成持续开销。
-      if (record._promaStableKey !== key) record._promaStableKey = key
-      return message
-    }
-    const hasUuid = (message: SDKMessage): boolean => {
-      const uuid = (message as Record<string, unknown>).uuid
-      return typeof uuid === 'string' && uuid.length > 0
-    }
-    const result: SDKMessage[] = []
-    const uuidIndexes = new Map<string, number>()
-    const upsert = (message: SDKMessage): void => {
-      const stamped = stampStableKey(message)
-      if (hasUuid(stamped)) {
-        const key = (stamped as Record<string, unknown>)._promaStableKey as string
-        const existingIndex = uuidIndexes.get(key)
-        if (existingIndex != null) {
-          result[existingIndex] = stamped
-          return
-        }
-        uuidIndexes.set(key, result.length)
-      }
-      result.push(stamped)
-    }
-
-    for (const message of persisted) upsert(message)
-    for (const message of live) upsert(message)
-    return result
-  }, [persistedSDKMessages, liveMessages])
+  const transcriptHistory = React.useMemo(
+    () => prepareTranscriptHistory(persistedSDKMessages ?? EMPTY_SDK_MESSAGES, getSDKMessageStableKey),
+    [persistedSDKMessages],
+  )
+  const transcript = React.useMemo(
+    () => mergeTranscriptMessages(transcriptHistory, liveMessages ?? EMPTY_SDK_MESSAGES, getSDKMessageStableKey),
+    [transcriptHistory, liveMessages],
+  )
+  const allSDKMessages = transcript.messages
   const hasContent = allSDKMessages.length > 0
   // 跨 turn task_notification 是历史 Task 卡片唯一需要追踪的外部元数据。
   // 普通 token/live snapshot 不改变此签名，MessageGroupRenderer comparator 因而可忽略全消息数组新引用。
   const taskNotificationSignature = React.useMemo(() => (
-    allSDKMessages
-      .filter((message) => message.type === 'system' && message.subtype === 'task_notification')
+    transcript.notifications
       .map((message) => getSDKMessageStableKey(message))
       .join('\u0000')
-  ), [allSDKMessages])
+  ), [transcript.notifications])
 
   // 在当前 run 的全部 live turn 中汇总任务。压缩边界或后台唤醒会拆开 turn，
   // 不能只取最后一段，否则此前已创建但未再次更新的任务会从进度卡消失。
-  const liveTaskActivities = React.useMemo(() => {
+  const projectToolMessagesRef = React.useRef(createToolMessageProjection())
+  const taskMessages = React.useMemo(() => {
     const currentRunMessages = (liveMessages ?? []).filter((message) => {
       const record = message as Record<string, unknown>
       const messageRunGeneration = record._promaLiveRunGeneration
@@ -1046,11 +1021,14 @@ export const AgentMessages = React.memo(function AgentMessages({
       }
       return startedAt == null || messageRunStartedAt == null || messageRunStartedAt === startedAt
     })
-    return groupIntoTurns(currentRunMessages, sessionModelId)
+    return projectToolMessagesRef.current(currentRunMessages)
+  }, [liveMessages, startedAt, streamState?.runGeneration])
+  const liveTaskActivities = React.useMemo(() => {
+    return groupIntoTurns(taskMessages, sessionModelId)
       .flatMap((group) => group.type === 'assistant-turn'
         ? buildTaskProgressDataForTurn(group).taskActivities
         : [])
-  }, [liveMessages, sessionModelId, startedAt, streamState?.runGeneration])
+  }, [taskMessages, sessionModelId])
 
   const contextCompaction = React.useMemo(
     () => getContextCompactionProgress(liveMessages ?? [], streamState?.isCompacting, streamState?.contextCompaction),
@@ -1072,10 +1050,11 @@ export const AgentMessages = React.memo(function AgentMessages({
       sessionModelId,
       streaming,
       messageGroupCacheRef.current,
+      transcript.stablePrefix,
     )
     messageGroupCacheRef.current = result.cache
     return result.groups
-  }, [allSDKMessages, sessionModelId, streaming])
+  }, [allSDKMessages, sessionModelId, streaming, transcript.stablePrefix])
   // 标记哪些 group 属于实时流式消息（用于 isStreaming / onFork 差异化渲染）。
   // 该集合必须先于 visibleGroups 计算，让空 assistant snapshot 能在真正渲染前被过滤。
   const liveGroupSet = React.useMemo(() => {

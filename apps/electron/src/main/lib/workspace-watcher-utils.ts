@@ -39,12 +39,20 @@ export function shouldNotifyForWatchFilename(filename: string | Buffer | null): 
   return normalizedFilename !== null && (!isHighNoisePath(normalizedFilename) || isGitDiffStatePath(normalizedFilename))
 }
 
+/** 输入相对 Proma 数据根；项目里的同名文件不受影响。 */
+export function isManagedSessionStoragePath(relativePath: string): boolean {
+  const path = normalizeWatchFilename(relativePath)
+  return path === 'agent-sessions' || path?.startsWith('agent-sessions/') === true
+    || /^agent-sessions\.json(?:\.(?:tmp|bak))?$/.test(path ?? '')
+    || path === 'sdk-config/sessions' || path?.startsWith('sdk-config/sessions/') === true
+}
+
 /** 输入相对 agent-workspaces 根目录；仅工作区顶层能力目录触发能力通知。 */
 export function classifyWorkspaceWatchFilename(filename: string | Buffer | null): 'capabilities' | 'files' | null {
   const normalized = normalizeWatchFilename(filename)
   if (!normalized || !shouldNotifyForWatchFilename(normalized)) return null
   const parts = normalized.split('/').filter(Boolean)
-  if (parts.length === 2 && parts[1] === 'config.json') return null
+  if (parts.length === 2 && /^config\.json(?:\.(?:tmp|bak))?$/.test(parts[1]!)) return null
   if ((parts.length === 2 && parts[1] === 'mcp.json')
     || parts[1] === 'skills' || parts[1] === 'skills-inactive') return 'capabilities'
   return 'files'

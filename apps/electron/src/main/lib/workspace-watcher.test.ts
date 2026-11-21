@@ -1,5 +1,24 @@
 import { describe, expect, it } from 'bun:test'
-import { shouldNotifyForWatchFilename } from './workspace-watcher-utils'
+import { classifyWorkspaceWatchFilename, isManagedSessionStoragePath, shouldNotifyForWatchFilename } from './workspace-watcher-utils'
+
+describe('工作区与会话写入隔离', () => {
+  it('只排除 Proma 数据根下的会话持久化路径', () => {
+    for (const path of ['agent-sessions/abc.jsonl', 'agent-sessions.json.tmp', 'agent-sessions.json.bak', 'sdk-config\\sessions\\abc.jsonl']) {
+      expect(isManagedSessionStoragePath(path)).toBe(true)
+    }
+    for (const path of ['../project/agent-sessions/abc.jsonl', 'agent-workspaces/team/session/report.jsonl', 'sdk-config/sessions-example/a.jsonl']) {
+      expect(isManagedSessionStoragePath(path)).toBe(false)
+    }
+  })
+
+  it('忽略工作区配置的原子写入但保留会话交付物及能力刷新', () => {
+    expect(classifyWorkspaceWatchFilename('team/config.json.tmp')).toBeNull()
+    expect(classifyWorkspaceWatchFilename('team/config.json.bak')).toBeNull()
+    expect(classifyWorkspaceWatchFilename('team/session/config.json')).toBe('files')
+    expect(classifyWorkspaceWatchFilename('team/session/report.jsonl')).toBe('files')
+    expect(classifyWorkspaceWatchFilename('team/mcp.json')).toBe('capabilities')
+  })
+})
 
 describe('shouldNotifyForWatchFilename', () => {
   it('refreshes only Git metadata that changes diff state', () => {

@@ -22,6 +22,7 @@
 import * as React from 'react'
 import { getDisplayName, highlightToTokens, onHighlighterReady } from '@proma/core'
 import type { HighlightToken, HighlightTokensResult } from '@proma/core'
+import { scheduleCodeHighlight } from './code-highlight-schedule'
 
 /** react-markdown 传入的 <code> 元素 props */
 interface CodeElementProps {
@@ -38,6 +39,14 @@ interface CodeBlockProps {
 
 /** 节流间隔（ms）：流式输出时限制高亮更新频率 */
 const THROTTLE_MS = 80
+const EMPTY_TOKENS: HighlightToken[] = []
+
+interface HighlightSnapshot {
+  code: string
+  language: string
+  rawLines: string[]
+  result: HighlightTokensResult
+}
 
 // ===== 工具函数 =====
 
@@ -144,56 +153,34 @@ export function CodeBlock({ children, onCopy }: CodeBlockProps): React.ReactElem
   const rawLines = React.useMemo(() => trimmedCode.split('\n'), [trimmedCode])
 
   // ---- 节流 token 高亮 ----
-  const [tokenResult, setTokenResult] = React.useState<HighlightTokensResult | null>(
-    () => highlightToTokens({ code: trimmedCode, language: langOrText })
-  )
-  const pendingCodeRef = React.useRef(trimmedCode)
-  const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
-  const lastUpdateRef = React.useRef(Date.now())
-
-  pendingCodeRef.current = trimmedCode
+  const [highlightSnapshot, setHighlightSnapshot] = React.useState<HighlightSnapshot | null>(null)
+  const lastHighlightRef = React.useRef<HighlightSnapshot | null>(null)
+  const lastRunAtRef = React.useRef(-Infinity)
 
   React.useEffect(() => {
-    const now = Date.now()
-    const elapsed = now - lastUpdateRef.current
-
-    const doHighlight = () => {
-      const currentCode = pendingCodeRef.current
-      const result = highlightToTokens({ code: currentCode, language: langOrText })
-      if (result) {
-        lastUpdateRef.current = Date.now()
-        setTokenResult(result)
-      }
-    }
-
-    // 同步路径可用时
-    const syncResult = highlightToTokens({ code: trimmedCode, language: langOrText })
-    if (syncResult) {
-      if (elapsed >= THROTTLE_MS) {
-        // 距上次更新已超过节流间隔，立即执行
-        lastUpdateRef.current = now
-        setTokenResult(syncResult)
-      } else if (!timerRef.current) {
-        // 安排延迟执行，确保最终状态正确
-        timerRef.current = setTimeout(() => {
-          timerRef.current = null
-          doHighlight()
-        }, THROTTLE_MS - elapsed)
-      }
-      return
-    }
+    const lastHighlight = lastHighlightRef.current
+    if (lastHighlight?.code === trimmedCode && lastHighlight.language === langOrText) return
 
     // 兜底：高亮器尚未初始化，订阅就绪事件，初始化完成后用同步路径上色
-    const unsubscribe = onHighlighterReady(() => doHighlight())
-    return () => unsubscribe()
-  }, [trimmedCode, langOrText])
+    // 清理节流定时器：输入变化或组件卸载时取消旧计算
+    return scheduleCodeHighlight({
+      onReady: onHighlighterReady,
+      lastRunAt: lastRunAtRef.current,
+      intervalMs: THROTTLE_MS,
+      highlight: (now) => {
+        lastRunAtRef.current = now
+        const result = highlightToTokens({ code: trimmedCode, language: langOrText })
+        if (!result) return
+        const snapshot = { code: trimmedCode, language: langOrText, rawLines, result }
+        lastHighlightRef.current = snapshot
+        setHighlightSnapshot(snapshot)
+      },
+    })
+  }, [trimmedCode, langOrText, rawLines])
 
-  // 清理节流定时器
-  React.useEffect(() => {
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current)
-    }
-  }, [])
+  // 只有同语言、未被替换的前缀才能继续使用旧 token；新增或改写的行先显示原文。
+  const visibleHighlight = highlightSnapshot?.language === langOrText
+    && trimmedCode.startsWith(highlightSnapshot.code) ? highlightSnapshot : null
 
   // 复制到剪贴板
   const handleCopy = React.useCallback(async () => {
@@ -225,7 +212,7 @@ export function CodeBlock({ children, onCopy }: CodeBlockProps): React.ReactElem
       <pre
         className="shiki overflow-x-auto p-4 m-0 text-[0.875em] leading-[1.6] bg-[hsl(var(--code-bg))]"
         style={{
-          color: tokenResult?.fgColor ?? '#e1e4e8',
+          color: visibleHighlight?.result.fgColor ?? '#e1e4e8',
           borderRadius: '0 0 8px 8px',
         }}
       >
@@ -234,7 +221,9 @@ export function CodeBlock({ children, onCopy }: CodeBlockProps): React.ReactElem
             <React.Fragment key={i}>
               {i > 0 && '\n'}
               <CodeLine
-                tokens={tokenResult?.lines[i] ?? []}
+                tokens={visibleHighlight?.rawLines[i] === rawLine
+                  ? visibleHighlight.result.lines[i] ?? EMPTY_TOKENS
+                  : EMPTY_TOKENS}
                 rawLine={rawLine}
               />
             </React.Fragment>

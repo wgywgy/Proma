@@ -13,13 +13,13 @@
 
 import { watch, existsSync, statSync } from 'node:fs'
 import type { FSWatcher } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import type { BrowserWindow } from 'electron'
 import { AGENT_IPC_CHANNELS } from '@proma/shared'
-import { getAgentWorkspacesDir } from './config-paths'
+import { getAgentWorkspacesDir, getConfigDir } from './config-paths'
 import { listAgentSessions } from './agent-session-manager'
 import { invalidateGitDiffCache } from './git-diff-service'
-import { classifyWorkspaceWatchFilename, isHighNoisePath, normalizeWatchFilename, shouldNotifyForWatchFilename } from './workspace-watcher-utils'
+import { classifyWorkspaceWatchFilename, isManagedSessionStoragePath, normalizeWatchFilename, shouldNotifyForWatchFilename } from './workspace-watcher-utils'
 
 /** debounce 延迟（ms） */
 const DEBOUNCE_MS = 300
@@ -151,10 +151,11 @@ function watchUnavailableDirectoryParent(dirPath: string): void {
         }
 
         const changedPath = resolve(parentPath, normalizedFilename)
-        const isTargetRecovery = [...targetPaths].some(
-          (targetPath) => resolve(targetPath) === changedPath,
-        )
-        if (!isTargetRecovery && isHighNoisePath(normalizedFilename)) return
+        const isTargetRecovery = [...targetPaths].some((targetPath) => {
+          const nextSegment = relative(parentPath, targetPath).split(/[\\/]/)[0]
+          return nextSegment && resolve(parentPath, nextSegment) === changedPath
+        })
+        if (!isTargetRecovery && changedPath !== parentPath) return
         notifyWorkspaceFilesChanged()
       })
       entry = { watcher, targetPaths }
@@ -218,12 +219,10 @@ export function startWorkspaceWatcher(win: BrowserWindow): void {
       const normalizedFilename = normalizeWatchFilename(filename)
       if (normalizedFilename === null) return
 
-      // 普通文件及有限的 Diff 状态元数据变更均需失效缓存；fetch 的高噪声 Git 元数据仍被忽略。
-      if (shouldNotifyForWatchFilename(normalizedFilename)) {
-        invalidateGitDiffCache(join(watchDir, normalizedFilename))
-      }
       const changeType = classifyWorkspaceWatchFilename(normalizedFilename)
       if (!changeType) return
+      // 普通文件及有限的 Diff 状态元数据变更均需失效缓存；fetch 的高噪声 Git 元数据仍被忽略。
+      invalidateGitDiffCache(join(watchDir, normalizedFilename))
 
       if (changeType === 'capabilities') {
         // MCP/Skills 变化 → 通知侧边栏刷新
@@ -314,10 +313,15 @@ export function watchAttachedDirectory(dirPath: string): void {
   if (attachedWatchers.has(dirPath)) return
 
   try {
+    const configDir = getConfigDir()
     const w = watch(dirPath, { recursive: true }, (_eventType, filename) => {
       const normalizedFilename = normalizeWatchFilename(filename)
       if (normalizedFilename === null || !shouldNotifyForWatchFilename(normalizedFilename)) return
       const changedPath = join(dirPath, normalizedFilename)
+      const configRelativePath = relative(configDir, changedPath)
+      if (isManagedSessionStoragePath(process.platform === 'win32' || process.platform === 'darwin'
+        ? configRelativePath.toLowerCase()
+        : configRelativePath)) return
       invalidateGitDiffCache(changedPath)
       notifyWorkspaceFilesChanged(changedPath)
     })

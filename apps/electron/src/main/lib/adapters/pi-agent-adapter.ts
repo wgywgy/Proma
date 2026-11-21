@@ -80,7 +80,6 @@ import {
 import { DEFAULT_CONTEXT_WINDOW, buildModel } from './pi-model-registry'
 import { PendingPromptSkillActivationTracker } from './pi-skill-activation-tracker'
 import { normalizePiToolResultDetails, serializePiToolResultPayload } from './pi-tool-result-json'
-import { getToolOutputDirectory, installToolOutputBudgetHooks } from './pi-tool-output-budget'
 import { BROWSER_ENABLE_TOOL_NAME, createBrowserToolPolicy, isManagedBrowserTool } from './pi-browser-tool-policy'
 import { createPiRetryTerminalGate, mapPiNativeRetryEvent } from './pi-retry-control'
 import { preparePiInterruptedContext } from './pi-interrupted-context'
@@ -1684,10 +1683,6 @@ export class PiAgentAdapter implements AgentProviderAdapter {
           : options),
       )
       installRuntimeGuardHooks(session, runtimeGuard)
-      installToolOutputBudgetHooks(
-        session.agent,
-        getToolOutputDirectory(input.piSessionDir, input.sessionId),
-      )
       if (!billionContextSettings.enabled) installCurrentSessionCompactionHooks(session)
       active.session = session
       resolveActiveReady(active, session)

@@ -101,6 +101,7 @@ export function startMacAgentIslandNativeHost(options: MacAgentIslandNativeHostO
 
   current.stdout.setEncoding('utf8')
   current.stdout.on('data', (chunk: string) => {
+    if (current !== child || closing) return
     stdoutBuffer += chunk
     let newline = stdoutBuffer.indexOf('\n')
     while (newline >= 0) {
@@ -112,6 +113,7 @@ export function startMacAgentIslandNativeHost(options: MacAgentIslandNativeHostO
           if (event.protocol !== PROTOCOL) {
             options.onUnavailable(`unsupported native helper protocol: ${event.protocol}`)
             disposeMacAgentIslandNativeHost()
+            return
           } else if (!ready) {
             ready = true
             clearReadyTimer()
@@ -120,6 +122,7 @@ export function startMacAgentIslandNativeHost(options: MacAgentIslandNativeHostO
         } else if (event?.type === 'fatal') {
           disposeMacAgentIslandNativeHost()
           options.onUnavailable(`native helper fatal: ${event.message}`)
+          return
         } else if (event) {
           options.onEvent(event)
         }

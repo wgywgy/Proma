@@ -41,6 +41,9 @@ export function WorkspaceMemoryWindowApp(): React.ReactElement {
   const selectedPathRef = React.useRef<string | null>(null)
   const dirtyRef = React.useRef(false)
   const textRef = React.useRef('')
+  const baseTextRef = React.useRef('')
+  const editorRef = React.useRef<HTMLTextAreaElement>(null)
+  const [findText, setFindText] = React.useState('')
 
   React.useEffect(() => {
     selectedPathRef.current = selectedPath
@@ -68,9 +71,11 @@ export function WorkspaceMemoryWindowApp(): React.ReactElement {
       dirtyRef.current = false
       setSelectedPath(file.relativePath)
       textRef.current = file.content ?? ''
+      baseTextRef.current = textRef.current
       setText(file.content ?? '')
       setDirty(false)
       setRemoteChanged(false)
+      setFindText('')
       setViewMode('preview')
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '读取记忆文件失败')
@@ -137,7 +142,8 @@ export function WorkspaceMemoryWindowApp(): React.ReactElement {
     const savedText = textRef.current
     setSaving(true)
     try {
-      await window.electronAPI.writeWorkspaceAutoMemoryFile(workspaceSlug, savedPath, savedText)
+      await window.electronAPI.writeWorkspaceAutoMemoryFile(workspaceSlug, savedPath, savedText, baseTextRef.current)
+      if (selectedPathRef.current === savedPath) baseTextRef.current = savedText
       const unchangedSinceSave = selectedPathRef.current === savedPath && textRef.current === savedText
       dirtyRef.current = !unchangedSinceSave
       setDirty(!unchangedSinceSave)
@@ -151,6 +157,44 @@ export function WorkspaceMemoryWindowApp(): React.ReactElement {
       setSaving(false)
     }
   }, [refreshFiles, remoteChanged, saving, selectedPath, workspaceSlug])
+
+  const restorePrevious = async (): Promise<void> => {
+    if (!selectedPath || dirtyRef.current || saving || remoteChanged || loadingFile) return
+    const base = baseTextRef.current
+    try {
+      const file = await window.electronAPI.readWorkspaceAutoMemoryFile(workspaceSlug, selectedPath, true)
+      if (selectedPathRef.current !== selectedPath || dirtyRef.current || baseTextRef.current !== base) return
+      if (file.content !== base) {
+        setRemoteChanged(true)
+        return
+      }
+      if (file.previousContent === undefined || file.previousContent === base) {
+        toast.message('没有可恢复的上一版本。')
+        return
+      }
+      dirtyRef.current = true
+      textRef.current = file.previousContent
+      setText(file.previousContent)
+      setDirty(true)
+      setViewMode('edit')
+      toast.message('上一版本已载入草稿，保存后才会写回。')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '读取上一版本失败')
+    }
+  }
+
+  const findNext = (): void => {
+    const editor = editorRef.current
+    if (!editor || !findText) return
+    let start = editor.value.indexOf(findText, editor.selectionEnd)
+    if (start < 0) start = editor.value.indexOf(findText)
+    if (start < 0) {
+      toast.message('当前文件中没有匹配项。')
+      return
+    }
+    editor.focus()
+    editor.setSelectionRange(start, start + findText.length)
+  }
 
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -252,11 +296,18 @@ export function WorkspaceMemoryWindowApp(): React.ReactElement {
                   <button type="button" onClick={() => setViewMode('preview')} className={cn('flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition-colors', viewMode === 'preview' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}><Eye size={13} />预览</button>
                   <button type="button" onClick={() => setViewMode('edit')} className={cn('flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition-colors', viewMode === 'edit' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}><Code2 size={13} />编辑</button>
                 </div>}
+                <Button size="sm" variant="outline" onClick={() => void restorePrevious()} disabled={!selectedPath || dirty || saving || remoteChanged || loadingFile}>恢复上一版</Button>
                 <Button size="sm" onClick={() => void save()} disabled={!selectedPath || !dirty || saving || remoteChanged}>{saving ? <Loader2 size={14} className="mr-1.5 animate-spin" /> : <Save size={14} className="mr-1.5" />}{saving ? '保存中' : '保存'}</Button>
               </div>
             </div>
             {remoteChanged && <div className="flex shrink-0 items-center justify-between gap-3 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-800 dark:text-amber-200"><span>该文件已在其他位置更新。重新载入后再编辑，以免覆盖新内容。</span><Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => selectedPath && void openFile(selectedPath)}>重新载入</Button></div>}
-            {loadingFile ? <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">读取文件中…</div> : selectedPath && viewMode === 'edit' ? <textarea value={text} onChange={(event) => { dirtyRef.current = true; textRef.current = event.target.value; setText(event.target.value); setDirty(true) }} disabled={saving} spellCheck={false} className="min-h-0 flex-1 resize-none bg-transparent p-5 font-mono text-[13px] leading-6 text-foreground outline-none" placeholder="# Memory\n\n记录稳定、可复用的协作知识。" /> : selectedPath ? <div className="min-h-0 flex-1 overflow-y-auto p-6">{text.trim() ? <MessageResponse className="text-[14px] prose-headings:scroll-mt-4">{text}</MessageResponse> : <div className="flex h-full min-h-[240px] items-center justify-center rounded-lg border border-dashed border-border/70 text-sm text-muted-foreground">当前文件为空，切换到编辑后可以写入 Markdown 内容。</div>}</div> : <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">从左侧选择一个记忆文件</div>}
+            {selectedPath && !loadingFile && viewMode === 'edit' && (
+              <form className="flex shrink-0 items-center gap-2 border-b border-border/60 px-4 py-2" onSubmit={(event) => { event.preventDefault(); findNext() }}>
+                <input aria-label="在当前文件中查找" placeholder="查找记忆条目" value={findText} onChange={(event) => setFindText(event.target.value)} className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-xs" />
+                <Button type="submit" size="sm" variant="outline" disabled={!findText || saving}>查找下一处</Button>
+              </form>
+            )}
+            {loadingFile ? <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">读取文件中…</div> : selectedPath && viewMode === 'edit' ? <textarea ref={editorRef} value={text} onChange={(event) => { dirtyRef.current = true; textRef.current = event.target.value; setText(event.target.value); setDirty(true) }} disabled={saving} spellCheck={false} className="min-h-0 flex-1 resize-none bg-transparent p-5 font-mono text-[13px] leading-6 text-foreground outline-none" placeholder="# Memory\n\n记录稳定、可复用的协作知识。" /> : selectedPath ? <div className="min-h-0 flex-1 overflow-y-auto p-6">{text.trim() ? <MessageResponse className="text-[14px] prose-headings:scroll-mt-4">{text}</MessageResponse> : <div className="flex h-full min-h-[240px] items-center justify-center rounded-lg border border-dashed border-border/70 text-sm text-muted-foreground">当前文件为空，切换到编辑后可以写入 Markdown 内容。</div>}</div> : <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">从左侧选择一个记忆文件</div>}
           </section>
         </main>
       </div>

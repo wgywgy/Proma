@@ -807,7 +807,7 @@ export interface ElectronAPI {
   listWorkspaceAutoMemoryFiles: (workspaceSlug: string) => Promise<import('@proma/shared').SkillFileNode[]>
 
   /** 读取工作区长期记忆文件 */
-  readWorkspaceAutoMemoryFile: (workspaceSlug: string, relativePath: string) => Promise<import('@proma/shared').SkillFileContent>
+  readWorkspaceAutoMemoryFile: (workspaceSlug: string, relativePath: string, includePrevious?: boolean) => Promise<import('@proma/shared').WorkspaceMemoryFileContent>
 
   /** 写入工作区长期记忆文件 */
   writeWorkspaceAutoMemoryFile: (workspaceSlug: string, relativePath: string, content: string, expectedContent?: string) => Promise<void>
@@ -2223,8 +2223,8 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_WORKSPACE_AUTO_MEMORY_FILES, workspaceSlug)
   },
 
-  readWorkspaceAutoMemoryFile: (workspaceSlug: string, relativePath: string) => {
-    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.READ_WORKSPACE_AUTO_MEMORY_FILE, workspaceSlug, relativePath)
+  readWorkspaceAutoMemoryFile: (workspaceSlug: string, relativePath: string, includePrevious?: boolean) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.READ_WORKSPACE_AUTO_MEMORY_FILE, workspaceSlug, relativePath, includePrevious)
   },
 
   writeWorkspaceAutoMemoryFile: (workspaceSlug: string, relativePath: string, content: string, expectedContent?: string) => {

@@ -1190,6 +1190,11 @@ export interface SkillFileContent {
   size: number
 }
 
+export interface WorkspaceMemoryFileContent extends SkillFileContent {
+  /** 上次通过记忆编辑器保存前的文本；仅在请求历史时返回。 */
+  previousContent?: string
+}
+
 /** 当前 Memory 页面订阅到的单个文件更新；仅携带受限的局部文本 diff。 */
 export interface WorkspaceMemoryFileChange {
   relativePath: string

@@ -2,6 +2,7 @@ import * as React from 'react'
 import { ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getToolDisplayName, getToolIcon } from './tool-utils'
+import { createProgressScrollController } from './progress-scroll'
 import type {
   SDKContentBlock,
   SDKToolUseBlock,
@@ -201,13 +202,17 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
   const [keepProgressViewport, setKeepProgressViewport] = React.useState(!!isStreaming)
   const [collapseCountdown, setCollapseCountdown] = React.useState<number | null>(null)
   const userToggledRef = React.useRef(false)
-  const followLatestRef = React.useRef(true)
-  const smoothScrollTargetRef = React.useRef<number | null>(null)
-  const scrollFrameRef = React.useRef<number | null>(null)
   const wasStreamingRef = React.useRef(!!isStreaming)
   const autoCollapseTimersRef = React.useRef<number[]>([])
   const contentRef = React.useRef<HTMLDivElement>(null)
   const contentInnerRef = React.useRef<HTMLDivElement>(null)
+  const scrollControllerRef = React.useRef<ReturnType<typeof createProgressScrollController> | null>(null)
+  if (!scrollControllerRef.current) {
+    scrollControllerRef.current = createProgressScrollController({
+      getViewport: () => contentRef.current,
+      canResume: isProgressViewportAtBottom,
+    })
+  }
   const stableChildrenRef = React.useRef(new Map<string, StableProcessChildCacheEntry>())
   const stableProcessBlocksRef = React.useRef(blocks)
   stableProcessBlocksRef.current = stabilizeProcessBlockReferences(stableProcessBlocksRef.current, blocks)
@@ -232,12 +237,8 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
       setKeepProgressViewport(true)
       if (!wasStreamingRef.current) {
         userToggledRef.current = false
-        followLatestRef.current = true
-        smoothScrollTargetRef.current = null
-        if (scrollFrameRef.current !== null) {
-          cancelAnimationFrame(scrollFrameRef.current)
-          scrollFrameRef.current = null
-        }
+        scrollControllerRef.current?.dispose()
+        scrollControllerRef.current?.resume()
       }
       if (!userToggledRef.current) setDisplayMode('expanded')
       wasStreamingRef.current = true
@@ -276,54 +277,21 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
   }, [clearAutoCollapseTimers, isStreaming])
 
   const scrollToLatest = React.useCallback(() => {
-    if (!followLatestRef.current) return
-    const viewport = contentRef.current
-    if (!viewport) return
-
-    smoothScrollTargetRef.current = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
-    if (scrollFrameRef.current !== null) return
-
-    const advanceScroll = (): void => {
-      const target = smoothScrollTargetRef.current
-      const activeViewport = contentRef.current
-      if (!followLatestRef.current || target == null || !activeViewport) {
-        scrollFrameRef.current = null
-        return
-      }
-
-      const distance = target - activeViewport.scrollTop
-      if (Math.abs(distance) <= 1) {
-        activeViewport.scrollTop = target
-        smoothScrollTargetRef.current = null
-        scrollFrameRef.current = null
-        return
-      }
-
-      // 内容突增时快速追近，正常增量则保持低成本的连续插值。
-      const nextTop = distance > 72
-        ? target - 48
-        : activeViewport.scrollTop + distance * 0.32
-      activeViewport.scrollTop = nextTop
-      scrollFrameRef.current = requestAnimationFrame(advanceScroll)
-    }
-
-    scrollFrameRef.current = requestAnimationFrame(advanceScroll)
+    scrollControllerRef.current?.request()
   }, [])
+
+  React.useEffect(() => () => scrollControllerRef.current?.dispose(), [])
 
   React.useLayoutEffect(() => {
     if (!isStreaming || !keepProgressViewport) return
     const content = contentInnerRef.current
     if (!content) return
 
-    const frame = requestAnimationFrame(scrollToLatest)
+    scrollToLatest()
     const observer = new ResizeObserver(scrollToLatest)
     observer.observe(content)
     return () => {
-      cancelAnimationFrame(frame)
-      if (scrollFrameRef.current !== null) {
-        cancelAnimationFrame(scrollFrameRef.current)
-        scrollFrameRef.current = null
-      }
+      scrollControllerRef.current?.dispose()
       observer.disconnect()
     }
   }, [isStreaming, keepProgressViewport, scrollToLatest])
@@ -332,19 +300,12 @@ export function ProcessBlockGroup({ blocks, isStreaming, renderChildren, isMessa
     if (isStreaming && keepProgressViewport) scrollToLatest()
   }, [stableProcessBlocks, isStreaming, keepProgressViewport, scrollToLatest])
 
-  const handleProgressScroll = React.useCallback((event: React.UIEvent<HTMLDivElement>): void => {
-    if (!isProgressViewportAtBottom(event.currentTarget)) return
-    followLatestRef.current = true
-    scrollToLatest()
-  }, [scrollToLatest])
+  const handleProgressScroll = React.useCallback((): void => {
+    scrollControllerRef.current?.onScroll()
+  }, [])
 
   const handleProgressScrollIntent = React.useCallback((): void => {
-    smoothScrollTargetRef.current = null
-    followLatestRef.current = false
-    if (scrollFrameRef.current !== null) {
-      cancelAnimationFrame(scrollFrameRef.current)
-      scrollFrameRef.current = null
-    }
+    scrollControllerRef.current?.stop()
   }, [])
 
   const handleProgressKeyDown = React.useCallback((event: React.KeyboardEvent<HTMLDivElement>): void => {

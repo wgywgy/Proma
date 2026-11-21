@@ -1,5 +1,6 @@
 import type { SDKMessage, SDKUserMessage } from '@proma/shared'
 import { groupIntoTurns, isUserInputMessage, type MessageGroup } from '@proma/session-core'
+import type { StableMessagePrefix } from './transcript-cache'
 
 export interface MessageGroupRenderCache {
   prefixLength: number
@@ -7,6 +8,7 @@ export interface MessageGroupRenderCache {
   sessionModelId?: string
   prefixGroups: MessageGroup[]
   previousGroups: MessageGroup[]
+  prefixSource?: SDKMessage[]
 }
 
 export function createMessageGroupRenderCache(): MessageGroupRenderCache {
@@ -50,7 +52,7 @@ export function stabilizeMessageGroups(previous: MessageGroup[], next: MessageGr
   let changed = previous.length !== next.length
   const stable = next.map((group, index) => {
     const prior = previous[index]
-    if (prior && canReuseMessageGroup(prior, group)) return prior
+    if (prior && (prior === group || canReuseMessageGroup(prior, group))) return prior
     changed = true
     return group
   })
@@ -66,12 +68,14 @@ function findActiveTurnBoundary(messages: SDKMessage[]): number {
 /**
  * 流式时只重新分组当前 turn，历史前缀按 O(1) 身份检查复用。
  * 边界从最后一条真实用户输入开始，因此与完整 groupIntoTurns 的分组语义一致。
+ * 合并层提供未被 live 替换的前缀凭证；无凭证的调用方仍逐项核对，不能盲目复用。
  */
 export function groupMessagesForRendering(
   messages: SDKMessage[],
   sessionModelId: string | undefined,
   streaming: boolean,
   cache: MessageGroupRenderCache,
+  stablePrefix?: StableMessagePrefix,
 ): { groups: MessageGroup[]; cache: MessageGroupRenderCache } {
   if (!streaming) {
     const groups = stabilizeMessageGroups(cache.previousGroups, groupIntoTurns(messages, sessionModelId))
@@ -104,7 +108,10 @@ export function groupMessagesForRendering(
 
   const canReusePrefix = cache.prefixLength === boundary
     && cache.sessionModelId === sessionModelId
-    && cache.prefixMessages.every((message, index) => messages[index] === message)
+    && (
+      (stablePrefix && cache.prefixSource === stablePrefix.source && stablePrefix.length >= boundary)
+      || cache.prefixMessages.every((message, index) => messages[index] === message)
+    )
   const prefixMessages = canReusePrefix ? cache.prefixMessages : messages.slice(0, boundary)
   const prefixGroups = canReusePrefix
     ? cache.prefixGroups
@@ -120,6 +127,7 @@ export function groupMessagesForRendering(
       sessionModelId,
       prefixGroups,
       previousGroups: groups,
+      prefixSource: stablePrefix && stablePrefix.length >= boundary ? stablePrefix.source : undefined,
     },
   }
 }

@@ -69,6 +69,7 @@ import type {
   BulkImportSkillsResult,
   BulkImportWorkspaceSelection,
   SkillFileContent,
+  WorkspaceMemoryFileContent,
   WorkspaceCapabilities,
   WorkspaceMemorySummary,
   FileEntry,
@@ -3462,8 +3463,8 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(
     AGENT_IPC_CHANNELS.READ_WORKSPACE_AUTO_MEMORY_FILE,
-    async (_, workspaceSlug: string, relativePath: string): Promise<SkillFileContent> => {
-      return readWorkspaceAutoMemoryFile(workspaceSlug, relativePath)
+    async (_, workspaceSlug: string, relativePath: string, includePrevious?: boolean): Promise<WorkspaceMemoryFileContent> => {
+      return readWorkspaceAutoMemoryFile(workspaceSlug, relativePath, includePrevious)
     }
   )
 

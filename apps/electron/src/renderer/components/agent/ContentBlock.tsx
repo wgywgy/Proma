@@ -26,82 +26,28 @@ import { PreviewOpenButton } from './tool-result-renderers/preview-open-button'
 import { getTaskGetStatusLabel, parseTaskGetResult, type ParsedTaskGetResult } from './tool-result-renderers/task-get-result'
 import { parseTaskListResult, type ParsedTaskListItem } from './tool-result-renderers/task-list-result'
 import { formatDuration } from './AgentMessages'
-import { useSmoothStream } from '@proma/ui'
+import { useBatchedStream } from './batched-stream'
+import { areToolRenderPropsEqual, getToolMessageIndex, type ToolResultData, type SubAgentMeta } from './tool-message-index'
 import type {
   SDKContentBlock,
   SDKMessage,
   SDKTextBlock,
   SDKToolUseBlock,
   SDKThinkingBlock,
-  SDKUserMessage,
-  SDKToolResultBlock,
-  SDKSystemMessage,
 } from '@proma/shared'
 
 // ===== useToolResult Hook =====
 
-interface ToolResultData {
-  result?: string
-  isError?: boolean
-}
-
 /** 在 allMessages 中查找匹配 toolUseId 的工具结果 */
 function useToolResult(toolUseId: string, allMessages: SDKMessage[]): ToolResultData | null {
-  return React.useMemo(() => {
-    for (const msg of allMessages) {
-      if (msg.type !== 'user') continue
-      const userMsg = msg as SDKUserMessage
-      const contentBlocks = userMsg.message?.content
-      if (!Array.isArray(contentBlocks)) continue
-
-      for (const block of contentBlocks) {
-        if (block.type === 'tool_result') {
-          const resultBlock = block as SDKToolResultBlock
-          if (resultBlock.tool_use_id === toolUseId) {
-            let result: string | undefined
-            if (typeof resultBlock.content === 'string') {
-              result = resultBlock.content
-            } else if (Array.isArray(resultBlock.content)) {
-              result = (resultBlock.content as Array<{ type: string; text?: string }>)
-                .filter((c) => c.type === 'text' && typeof c.text === 'string')
-                .map((c) => c.text)
-                .join('\n')
-            }
-            return { result, isError: resultBlock.is_error }
-          }
-        }
-      }
-    }
-    return null
-  }, [toolUseId, allMessages])
+  return getToolMessageIndex(allMessages).results.get(toolUseId) ?? null
 }
 
 // ===== useSubAgentMeta Hook =====
 
-interface SubAgentMeta {
-  durationMs: number
-  totalTokens: number
-  toolUses: number
-}
-
 /** 从 allMessages 中查找匹配 toolUseId 的 task_notification 系统消息，提取用量数据 */
 function useSubAgentMeta(toolUseId: string, allMessages: SDKMessage[]): SubAgentMeta | null {
-  return React.useMemo(() => {
-    for (const msg of allMessages) {
-      if (msg.type !== 'system') continue
-      const sysMsg = msg as SDKSystemMessage
-      if (sysMsg.subtype !== 'task_notification') continue
-      if (sysMsg.tool_use_id !== toolUseId) continue
-      const usage = sysMsg.usage
-      if (!usage) return null
-      return {
-        durationMs: usage.duration_ms ?? 0,
-        totalTokens: usage.total_tokens ?? 0,
-        toolUses: usage.tool_uses ?? 0,
-      }
-    }
-    return null
-  }, [toolUseId, allMessages])
+  return getToolMessageIndex(allMessages).subAgents.get(toolUseId) ?? null
 }
 
 // ===== SubAgent 结果文本解析 =====
@@ -333,7 +279,7 @@ interface ToolUseBlockProps {
   isStreaming?: boolean
 }
 
-function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed = false, childBlocks, basePath, isStreaming }: ToolUseBlockProps): React.ReactElement {
+function ToolUseBlockComponent({ block, allMessages, animate = false, index = 0, dimmed = false, childBlocks, basePath, isStreaming }: ToolUseBlockProps): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false)
   const toolResult = useToolResult(block.id, allMessages)
   const resultText = toolResult?.result
@@ -564,6 +510,8 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
   )
 }
 
+const ToolUseBlock = React.memo(ToolUseBlockComponent, areToolRenderPropsEqual)
+
 // ===== 思考块（默认折叠，Thinking 标签 + 虚线边框） =====
 
 interface ThinkingBlockProps {
@@ -579,7 +527,7 @@ function ThinkingBlock({ block, dimmed = false, isStreaming = false }: ThinkingB
   const [isExpanded, setIsExpanded] = React.useState(false)
   const [shouldCollapse, setShouldCollapse] = React.useState(false)
   const contentRef = React.useRef<HTMLDivElement>(null)
-  const { displayedContent } = useSmoothStream({
+  const { displayedContent } = useBatchedStream({
     content: block.thinking,
     isStreaming,
   })
@@ -667,7 +615,7 @@ function StreamingTextBlock({
   basePath?: string
   basePaths?: string[]
 }): React.ReactElement {
-  const { displayedContent } = useSmoothStream({
+  const { displayedContent } = useBatchedStream({
     content: text,
     isStreaming: isStreaming ?? false,
   })

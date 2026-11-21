@@ -29,6 +29,7 @@ import { getAgentSessionMeta, listAgentSessions } from './agent-session-manager'
 import { isMacAgentIslandNativeHostReady, publishMacAgentIslandSnapshot } from './mac-agent-island-native-host'
 import { getAgentIslandTodoAttentionKeys, selectAgentIslandTodos } from './agent-island-planning'
 import { selectAgentIslandCompactPlanQuota } from './agent-island-plan-quota'
+import { createAgentIslandQuotaRefresh } from './agent-island-quota-refresh'
 import { getAgentIslandPhasePriority } from './agent-island-priority'
 import { buildVisibilityKey } from './agent-island-visibility'
 import { shouldRetainAgentIslandSession } from './agent-island-session-visibility'
@@ -49,7 +50,7 @@ const PLANNING_ATTENTION_WINDOW_MS = 60 * 60_000
 const PUSH_THROTTLE_MS = 80
 /** 普通 Agent 流事件只需低频合并；状态页不展示 token / 工具流水。 */
 const AGENT_STREAM_PUSH_THROTTLE_MS = 2_000
-/** 订阅 Plan 额度的后台刷新间隔；轮播在 Swift 本地完成，无需频繁网络请求。 */
+/** 展开时按需刷新 Plan 额度，限制短时间内重复展开的请求。 */
 const PLAN_QUOTA_REFRESH_MS = 5 * 60_000
 const PLAN_QUOTA_PROVIDERS = new Set(['openai-codex', 'deepseek', 'kimi-coding', 'minimax', 'zhipu', 'zhipu-coding', 'zhipu-coding-team'])
 /** Hover 只是一种临时展开意图，避免 Swift 渲染层自行维护状态机。 */
@@ -85,13 +86,14 @@ let nativeRevision = 0
 let planningRevision = 0
 let planningRolloverTimer: ReturnType<typeof setTimeout> | null = null
 let planningAttentionTimer: ReturnType<typeof setTimeout> | null = null
-let planQuotaRefreshTimer: ReturnType<typeof setTimeout> | null = null
+const planQuotaRefresh = createAgentIslandQuotaRefresh(PLAN_QUOTA_REFRESH_MS)
 let planQuotas: AgentIslandPlanQuotaSnapshot[] = []
 /** 当前被用户主动关闭的提醒指纹；出现新的事项/Agent 状态时自动失效。 */
 let dismissedVisibilityKey: string | null = null
 let currentVisibilityKey = ''
 let disposePlanningListener: (() => void) | null = null
 let serviceDeps: AgentIslandServiceDeps | null = null
+let configuredDeps: AgentIslandServiceDeps | null = null
 
 // ===== 工具函数 =====
 
@@ -663,35 +665,33 @@ function pushPlanningStateImmediately(): void {
 }
 
 async function refreshPlanQuotas(): Promise<void> {
-  const supportedChannels = listChannels().filter((channel) => channel.enabled && PLAN_QUOTA_PROVIDERS.has(channel.provider))
+  if (!initialized || serviceDeps?.enabled?.() === false) return
   try {
-    const results = await Promise.all(supportedChannels.map(async (channel) => ({ channel, quota: await getChannelPlanQuota(channel.id) })))
-    const next = results.flatMap(({ channel, quota }) => {
-      if (!quota.supported || quota.windows.length === 0) return []
-      return [{
-        channelId: channel.id,
-        channelName: channel.name,
-        planName: quota.planName || channel.name,
-        windows: quota.windows.map((window) => ({
-          windowType: window.type,
-          windowLabel: window.label,
-          remainingPercent: window.remainingPercent,
-          remainingLabel: window.remainingLabel,
-        })),
-      }]
-    })
-    if (JSON.stringify(next) !== JSON.stringify(planQuotas)) {
+    await planQuotaRefresh.run(async () => {
+      const supportedChannels = listChannels().filter((channel) => channel.enabled && PLAN_QUOTA_PROVIDERS.has(channel.provider))
+      const results = await Promise.all(supportedChannels.map(async (channel) => ({ channel, quota: await getChannelPlanQuota(channel.id) })))
+      return results.flatMap(({ channel, quota }) => {
+        if (!quota.supported || quota.windows.length === 0) return []
+        return [{
+          channelId: channel.id,
+          channelName: channel.name,
+          planName: quota.planName || channel.name,
+          windows: quota.windows.map((window) => ({
+            windowType: window.type,
+            windowLabel: window.label,
+            remainingPercent: window.remainingPercent,
+            remainingLabel: window.remainingLabel,
+          })),
+        }]
+      })
+    }, (next) => {
+      if (serviceDeps?.enabled?.() === false || JSON.stringify(next) === JSON.stringify(planQuotas)) return
       planQuotas = next
       schedulePush()
-    }
+    })
   } catch {
     // Quota is supplemental island content: preserve the last known value and
     // never allow a provider/network failure to affect reminders or Agent state.
-  } finally {
-    if (initialized) {
-      if (planQuotaRefreshTimer) clearTimeout(planQuotaRefreshTimer)
-      planQuotaRefreshTimer = setTimeout(() => void refreshPlanQuotas(), PLAN_QUOTA_REFRESH_MS)
-    }
   }
 }
 
@@ -779,9 +779,15 @@ export interface AgentIslandServiceDeps {
   openAgentSession: (sessionId: string, title: string) => void
   /** 是否允许启用灵动岛（如设置开关） */
   enabled?: () => boolean
+  syncNativeSurface?: (enabled: boolean) => void
 }
 
 export function initAgentIslandService(deps: AgentIslandServiceDeps): void {
+  configuredDeps = deps
+  refreshAgentIslandConfiguration()
+}
+
+function startAgentIslandService(deps: AgentIslandServiceDeps): void {
   if (initialized) return
   initialized = true
   serviceDeps = deps
@@ -797,8 +803,6 @@ export function initAgentIslandService(deps: AgentIslandServiceDeps): void {
   })
   scheduleNextPlanningRollover()
   scheduleNextPlanningAttention()
-  void refreshPlanQuotas()
-
   // 订阅 Agent 事件流
   disposeEventBus = agentEventBus.on((sessionId, payload) => {
     handleAgentEvent(sessionId, payload)
@@ -835,6 +839,7 @@ function isExpanded(): boolean {
 export function setAgentIslandExpanded(next: boolean): void {
   if (manuallyExpanded === next && (next || !hoverExpanded)) return
   manuallyExpanded = next
+  if (next) void refreshPlanQuotas()
   // An explicit collapse wins over the current hover. The next leave/re-enter
   // cycle may reopen it, but a click must never appear to have been ignored.
   if (!next) {
@@ -859,6 +864,7 @@ export function setAgentIslandHovered(hovered: boolean): void {
     hoverTimer = null
     if (hoverExpanded === hovered) return
     hoverExpanded = hovered
+    if (hovered) void refreshPlanQuotas()
     schedulePush()
   }, hovered ? HOVER_EXPAND_DELAY_MS : HOVER_COLLAPSE_DELAY_MS)
 }
@@ -873,10 +879,17 @@ export function publishAgentIslandNow(): void {
 
 /** 设置更新后立即投影，避免等待下一条 Agent 或 Planning 事件。 */
 export function refreshAgentIslandConfiguration(): void {
-  if (!initialized) return
-  lastStateJson = ''
-  lastPushAt = 0
-  pushState()
+  const deps = configuredDeps
+  if (!deps) return
+  const enabled = deps.enabled?.() !== false
+  if (!enabled && deps.syncNativeSurface) {
+    deps.syncNativeSurface(false)
+    stopAgentIslandService()
+    return
+  }
+  startAgentIslandService(deps)
+  deps.syncNativeSurface?.(true)
+  publishAgentIslandNow()
 }
 
 export function isAgentIslandExpanded(): boolean {
@@ -921,6 +934,11 @@ export function handleNativeAgentIslandEvent(event: NativeAgentIslandEvent): voi
 }
 
 export function disposeAgentIslandService(): void {
+  configuredDeps = null
+  stopAgentIslandService()
+}
+
+function stopAgentIslandService(): void {
   disposeEventBus?.()
   disposeEventBus = null
   disposePlanningListener?.()
@@ -929,8 +947,8 @@ export function disposeAgentIslandService(): void {
   planningRolloverTimer = null
   if (planningAttentionTimer) clearTimeout(planningAttentionTimer)
   planningAttentionTimer = null
-  if (planQuotaRefreshTimer) clearTimeout(planQuotaRefreshTimer)
-  planQuotaRefreshTimer = null
+  planQuotaRefresh.reset()
+  planQuotas = []
   dismissedVisibilityKey = null
   currentVisibilityKey = ''
   serviceDeps = null

@@ -12,7 +12,6 @@ import {
 import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry'
 import { createPromaManagedResourceLoaderOptions } from './pi-resource-loader-overrides'
 import { BROWSER_ENABLE_TOOL_NAME, createBrowserToolPolicy } from './pi-browser-tool-policy'
-import { installToolOutputBudgetHooks, TOOL_OUTPUT_MAX_BYTES } from './pi-tool-output-budget'
 
 function failedAssistant(errorMessage: string): AssistantMessage {
   return {
@@ -57,7 +56,7 @@ describe('Pi 正式版升级', () => {
     })
   }
 
-  test('Given 受管会话 When 执行工具、断流重试并恢复历史 Then 不重复工具且保留输出预算', async () => {
+  test('Given 受管会话 When 执行工具、断流重试并恢复历史 Then 不重复工具且保留完整输出', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'proma-pi-upgrade-'))
     const agentDir = join(directory, 'agent')
     mkdirSync(agentDir)
@@ -113,7 +112,7 @@ describe('Pi 正式版升级', () => {
             async execute() { return { content: [{ type: 'text', text: 'snapshot' }], details: {} } },
           }),
           defineTool({
-            name: 'LargeOutput', label: '大输出', description: '测试输出预算',
+            name: 'LargeOutput', label: '大输出', description: '测试完整输出',
             parameters: Type.Object({}),
             async execute() {
               largeToolCalls++
@@ -124,7 +123,6 @@ describe('Pi 正式版升级', () => {
       })
       session = result.session
       session.setActiveToolsByName(browserPolicy.initialActiveToolNames(session.getActiveToolNames()))
-      installToolOutputBudgetHooks(session.agent, join(directory, 'tool-outputs'))
       expect(session.getActiveToolNames().sort()).toEqual([BROWSER_ENABLE_TOOL_NAME, 'LargeOutput'].sort())
       expect(session.systemPrompt).not.toContain('AMBIENT_')
       expect(settingsManager.getCacheWarmingMode()).toBe('off')
@@ -161,10 +159,8 @@ describe('Pi 正式版升级', () => {
       expect(observed[0]!.tools).not.toContain('BrowserObserve')
       expect(observed[1]!.tools).toContain('BrowserObserve')
       expect(observed[1]!.tools).not.toContain(BROWSER_ENABLE_TOOL_NAME)
-      const budgeted = observed[2]!.toolText.find((text) => text.includes('原始 100000 字节'))
-      expect(budgeted).toBeDefined()
-      expect(Buffer.byteLength(budgeted!)).toBeLessThanOrEqual(TOOL_OUTPUT_MAX_BYTES)
-      expect(observed[3]!.toolText).toContain(budgeted!)
+      expect(observed[2]!.toolText).toContain('x'.repeat(100_000))
+      expect(observed[3]!.toolText).toContain('x'.repeat(100_000))
       expect(session.isStreaming).toBe(false)
 
       const sessionFile = session.sessionManager.getSessionFile()
@@ -176,6 +172,8 @@ describe('Pi 正式版升级', () => {
         sessionManager: SessionManager.open(sessionFile),
       })).session
       expect(resumed.agent.state.messages.some((message) => message.role === 'toolResult')).toBe(true)
+      expect(resumed.agent.state.messages.some((message) => message.role === 'toolResult'
+        && message.content.some((block) => block.type === 'text' && block.text === 'x'.repeat(100_000)))).toBe(true)
       expect(resumed.agent.state.messages.some((message) => message.role === 'assistant'
         && message.content.some((block) => block.type === 'text' && block.text === '离线回归完成'))).toBe(true)
     } finally {
